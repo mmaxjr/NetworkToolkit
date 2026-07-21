@@ -123,6 +123,19 @@ def _save_ssh_hosts(hosts):
 
 COMMON_PORTS = [21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 3389, 8080]
 
+# (label, screen name, vector icon kind, short description) for every tool
+# screen -- shared by the Home dashboard's grid and the "Mais"/"Todas"
+# sheet, so both stay in sync automatically.
+TOOL_CATALOG = [
+    ("Ping", "ping", "ping", "Teste de conectividade ICMP"),
+    ("Wi-Fi", "wifi", "wifi", "Informacoes da rede e redes proximas"),
+    ("Speedtest", "speed", "speed", "Velocidade de download da internet"),
+    ("Portas", "ports", "ports", "Verifique portas TCP abertas"),
+    ("Varredura", "scan", "scan", "Descubra hosts ativos na rede"),
+    ("Terminal", "terminal", "shell", "Comandos de shell, sem root"),
+    ("SSH", "ssh", "ssh", "Terminal remoto interativo"),
+]
+
 TERMINAL_COMMANDS = [
     ("ping -c 4 8.8.8.8", "Testa conectividade com a internet (mesmo mecanismo da aba Ping)"),
     ("ping -c 4 1.1.1.1", "Testa outro servidor DNS publico"),
@@ -206,6 +219,19 @@ def _signal_level_info(rssi):
     if rssi >= -70:
         return 2, WARNING, "Regular"
     return 1, DANGER, "Fraco"
+
+
+def _time_ago(ts):
+    """Human-readable "how long ago", used in the Home dashboard's
+    "Atividade recente" feed."""
+    delta = time.time() - ts
+    if delta < 60:
+        return "agora ha pouco"
+    if delta < 3600:
+        return "ha %d min" % int(delta // 60)
+    if delta < 86400:
+        return "ha %dh" % int(delta // 3600)
+    return "ha %dd" % int(delta // 86400)
 
 # ---------------------------------------------------------------------------
 # Theme -- paleta escura baseada no redesign visual v2 (cyan/dark, cards
@@ -502,6 +528,137 @@ class SignalBarsIcon(Widget):
             rect.size = (bar_w, h)
 
 
+class ToolIcon(Widget):
+    """Small vector line-icon drawn on canvas (no icon font is bundled with
+    the app, so every glyph used in tiles/rows/buttons is hand-drawn with
+    Line/Ellipse primitives instead, matching RefreshIcon/SignalBarsIcon
+    above). `kind` selects which glyph to draw."""
+
+    def __init__(self, kind, color=None, **kwargs):
+        kwargs.setdefault("size_hint", (1, 1))
+        super().__init__(**kwargs)
+        self.kind = kind
+        self.icon_color = color or BG
+        self.bind(pos=self._redraw, size=self._redraw)
+
+    def _redraw(self, *_):
+        self.canvas.clear()
+        w, h = self.width, self.height
+        if w <= 0 or h <= 0:
+            return
+        cx, cy = self.center
+        lw = max(dp(1.4), min(w, h) * 0.09)
+        draw = getattr(self, "_draw_%s" % self.kind, self._draw_default)
+        with self.canvas:
+            Color(*self.icon_color)
+            draw(cx, cy, w, h, lw)
+
+    def _draw_default(self, cx, cy, w, h, lw):
+        Line(circle=(cx, cy, min(w, h) * 0.28), width=lw)
+
+    def _draw_ping(self, cx, cy, w, h, lw):
+        x0 = cx - w * 0.34
+        pts = [
+            x0, cy,
+            x0 + w * 0.16, cy,
+            x0 + w * 0.25, cy + h * 0.30,
+            x0 + w * 0.37, cy - h * 0.32,
+            x0 + w * 0.48, cy,
+            x0 + w * 0.68, cy,
+        ]
+        Line(points=pts, width=lw, joint="round", cap="round")
+
+    def _draw_wifi(self, cx, cy, w, h, lw):
+        base_y = cy - h * 0.18
+        for r in (0.42, 0.26, 0.12):
+            Line(circle=(cx, base_y, min(w, h) * r, 35, 145), width=lw)
+        d = lw * 1.3
+        Ellipse(pos=(cx - d / 2, base_y - d / 2), size=(d, d))
+
+    def _draw_speed(self, cx, cy, w, h, lw):
+        r = min(w, h) * 0.32
+        Line(circle=(cx, cy, r, -200, 20), width=lw)
+        Line(points=[cx, cy, cx + r * 0.55, cy + r * 0.5], width=lw, joint="round", cap="round")
+        d = lw * 1.5
+        Ellipse(pos=(cx - d / 2, cy - d / 2), size=(d, d))
+
+    def _draw_ports(self, cx, cy, w, h, lw):
+        body_w, body_h = w * 0.42, h * 0.32
+        Line(rounded_rectangle=(cx - body_w / 2, cy - body_h / 2, body_w, body_h, dp(2)), width=lw)
+        Line(circle=(cx, cy + body_h * 0.34, body_w * 0.32, 0, 180), width=lw)
+
+    def _draw_scan(self, cx, cy, w, h, lw):
+        top = (cx, cy + h * 0.30)
+        left = (cx - w * 0.26, cy - h * 0.20)
+        right = (cx + w * 0.26, cy - h * 0.20)
+        Line(points=[top[0], top[1], left[0], left[1]], width=lw)
+        Line(points=[top[0], top[1], right[0], right[1]], width=lw)
+        Line(points=[left[0], left[1], right[0], right[1]], width=lw)
+        r = min(w, h) * 0.075
+        for px, py in (top, left, right):
+            Ellipse(pos=(px - r, py - r), size=(r * 2, r * 2))
+
+    def _draw_shell(self, cx, cy, w, h, lw):
+        Line(rounded_rectangle=(cx - w * 0.36, cy - h * 0.30, w * 0.72, h * 0.60, dp(3)), width=lw)
+        Line(
+            points=[cx - w * 0.18, cy + h * 0.08, cx - w * 0.05, cy, cx - w * 0.18, cy - h * 0.08],
+            width=lw, joint="round", cap="round",
+        )
+        Line(points=[cx, cy - h * 0.12, cx + w * 0.17, cy - h * 0.12], width=lw, cap="round")
+
+    def _draw_ssh(self, cx, cy, w, h, lw):
+        Line(rounded_rectangle=(cx - w * 0.34, cy - h * 0.02, w * 0.68, h * 0.46, dp(3)), width=lw)
+        Line(points=[cx - w * 0.14, cy - h * 0.30, cx + w * 0.14, cy - h * 0.30], width=lw, cap="round")
+        Line(points=[cx, cy - h * 0.02, cx, cy - h * 0.30], width=lw)
+
+    def _draw_more(self, cx, cy, w, h, lw):
+        r = min(w, h) * 0.065
+        for dx in (-0.24, 0, 0.24):
+            Ellipse(pos=(cx + w * dx - r, cy - r), size=(r * 2, r * 2))
+
+    def _draw_gear(self, cx, cy, w, h, lw):
+        r = min(w, h) * 0.22
+        Line(circle=(cx, cy, r), width=lw)
+        Line(circle=(cx, cy, r * 0.4), width=lw)
+        for i in range(6):
+            ang = math.radians(i * 60)
+            x1 = cx + math.cos(ang) * r * 1.15
+            y1 = cy + math.sin(ang) * r * 1.15
+            x2 = cx + math.cos(ang) * r * 1.42
+            y2 = cy + math.sin(ang) * r * 1.42
+            Line(points=[x1, y1, x2, y2], width=lw)
+
+    def _draw_person(self, cx, cy, w, h, lw):
+        r = min(w, h) * 0.16
+        Ellipse(pos=(cx - r, cy + h * 0.08 - r), size=(r * 2, r * 2))
+        Line(circle=(cx, cy - h * 0.16, min(w, h) * 0.26, 200, 340), width=lw)
+
+    def _draw_chevron(self, cx, cy, w, h, lw):
+        s = min(w, h) * 0.24
+        Line(
+            points=[cx - s * 0.4, cy - s, cx + s * 0.4, cy, cx - s * 0.4, cy + s],
+            width=lw, joint="round", cap="round",
+        )
+
+    def _draw_back(self, cx, cy, w, h, lw):
+        s = min(w, h) * 0.24
+        Line(
+            points=[cx + s * 0.4, cy - s, cx - s * 0.4, cy, cx + s * 0.4, cy + s],
+            width=lw, joint="round", cap="round",
+        )
+
+    def _draw_down(self, cx, cy, w, h, lw):
+        # "download" arrow used next to the Speedtest gauge's "MBPS" label
+        # -- drawn as a vector glyph because the down-arrow unicode
+        # character isn't in the bundled font (renders as a tofu box).
+        s = min(w, h) * 0.32
+        Line(points=[cx, cy - s, cx, cy + s], width=lw, cap="round")
+        Line(
+            points=[cx - s * 0.6, cy - s * 0.1, cx, cy - s, cx + s * 0.6, cy - s * 0.1],
+            width=lw, joint="round", cap="round",
+        )
+
+
 class SmallIconButton(RoundedBG, ButtonBehavior, BoxLayout):
     """Compact square button for a single symbol (e.g. refresh)."""
 
@@ -618,34 +775,34 @@ class NavButton(ButtonBehavior, BoxLayout):
             self._bg_color.rgba = (0, 0, 0, 0)
 
 
-class BackButton(ButtonBehavior, Label):
-    """Small "<" back arrow used in the per-screen TopBar."""
+class BackButton(RoundedBG, ButtonBehavior, BoxLayout):
+    """Rounded-square back button used in the per-screen TopBar."""
 
     def __init__(self, on_back, **kwargs):
-        kwargs.setdefault("text", "<")
         kwargs.setdefault("size_hint", (None, None))
-        kwargs.setdefault("size", (dp(32), dp(32)))
-        kwargs.setdefault("font_size", "20sp")
-        kwargs.setdefault("bold", True)
-        kwargs.setdefault("color", ACCENT)
-        super().__init__(**kwargs)
+        kwargs.setdefault("size", (dp(36), dp(36)))
+        super().__init__(bg_color=SURFACE_2, radius=dp(12), **kwargs)
+        self.add_widget(ToolIcon(
+            kind="back", color=ACCENT,
+            size_hint=(0.5, 0.5), pos_hint={"center_x": 0.5, "center_y": 0.5},
+        ))
         self.bind(on_release=lambda *_: on_back())
 
 
 class TopBar(BoxLayout):
-    """Per-screen header: back arrow + title (+ optional subtitle),
-    replacing the old persistent top logo bar. Every tool screen now owns
-    its own header, matching the redesigned visual (each screen is
-    "full bleed" with its own title area)."""
+    """Per-screen header: back arrow + title (+ optional subtitle) and an
+    optional right-side widget, replacing the old persistent top logo bar.
+    Every tool screen now owns its own header, matching the redesigned
+    visual (each screen is "full bleed" with its own title area)."""
 
-    def __init__(self, title, subtitle=None, on_back=None, **kwargs):
+    def __init__(self, title, subtitle=None, on_back=None, right_widget=None, **kwargs):
         kwargs.setdefault("orientation", "vertical")
         kwargs.setdefault("size_hint_y", None)
         kwargs.setdefault("padding", (0, dp(14), 0, dp(4)))
         kwargs.setdefault("spacing", dp(2))
         super().__init__(**kwargs)
 
-        top_row = BoxLayout(size_hint_y=None, height=dp(32), spacing=dp(10))
+        top_row = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(10))
         if on_back is not None:
             top_row.add_widget(BackButton(on_back))
         title_label = Label(
@@ -654,6 +811,8 @@ class TopBar(BoxLayout):
         )
         title_label.bind(size=lambda *_: setattr(title_label, "text_size", title_label.size))
         top_row.add_widget(title_label)
+        if right_widget is not None:
+            top_row.add_widget(right_widget)
         self.add_widget(top_row)
 
         if subtitle:
@@ -663,17 +822,17 @@ class TopBar(BoxLayout):
             )
             sub_label.bind(size=lambda *_: setattr(sub_label, "text_size", sub_label.size))
             self.add_widget(sub_label)
-            self.height = dp(70)
+            self.height = dp(74)
         else:
-            self.height = dp(48)
+            self.height = dp(52)
 
 
 class ToolTile(RoundedBG, ButtonBehavior, BoxLayout):
     """Square tile used in the Home dashboard's tool grid: an accent icon
-    badge (2-letter abbreviation, since we don't bundle an icon font) plus
-    a label. Tapping navigates straight to that tool's screen."""
+    badge (vector glyph, since we don't bundle an icon font) plus a label.
+    Tapping navigates straight to that tool's screen."""
 
-    def __init__(self, label, badge, on_press_cb, **kwargs):
+    def __init__(self, label, icon, on_press_cb, **kwargs):
         kwargs.setdefault("orientation", "vertical")
         kwargs.setdefault("size_hint_y", None)
         kwargs.setdefault("height", dp(92))
@@ -686,7 +845,9 @@ class ToolTile(RoundedBG, ButtonBehavior, BoxLayout):
             Color(*ACCENT)
             self._badge_rect = RoundedRectangle(pos=badge_wrap.pos, size=badge_wrap.size, radius=[dp(10)])
         badge_wrap.bind(pos=self._sync_badge, size=self._sync_badge)
-        badge_wrap.add_widget(Label(text=badge, color=BG, bold=True, font_size="13sp"))
+        badge_wrap.add_widget(ToolIcon(
+            kind=icon, color=BG, size_hint=(0.6, 0.6), pos_hint={"center_x": 0.5, "center_y": 0.5},
+        ))
         self.add_widget(badge_wrap)
 
         text_label = Label(
@@ -704,9 +865,10 @@ class ToolTile(RoundedBG, ButtonBehavior, BoxLayout):
 
 
 class MoreListItem(RoundedBG, ButtonBehavior, BoxLayout):
-    """Row used inside the "Mais" bottom sheet: icon badge + label + sub."""
+    """Row used inside the "Mais" bottom sheet and lists like SSH's saved
+    hosts: icon badge + label + sub + trailing chevron."""
 
-    def __init__(self, label, sub, badge, on_press_cb, **kwargs):
+    def __init__(self, label, sub, icon, on_press_cb, **kwargs):
         kwargs.setdefault("size_hint_y", None)
         kwargs.setdefault("height", dp(64))
         kwargs.setdefault("padding", (dp(14), dp(8)))
@@ -718,7 +880,9 @@ class MoreListItem(RoundedBG, ButtonBehavior, BoxLayout):
             Color(*ACCENT)
             self._badge_rect = RoundedRectangle(pos=badge_wrap.pos, size=badge_wrap.size, radius=[dp(10)])
         badge_wrap.bind(pos=self._sync_badge, size=self._sync_badge)
-        badge_wrap.add_widget(Label(text=badge, color=BG, bold=True, font_size="13sp"))
+        badge_wrap.add_widget(ToolIcon(
+            kind=icon, color=BG, size_hint=(0.6, 0.6), pos_hint={"center_x": 0.5, "center_y": 0.5},
+        ))
         self.add_widget(badge_wrap)
 
         text_col = BoxLayout(orientation="vertical", spacing=dp(2))
@@ -735,6 +899,11 @@ class MoreListItem(RoundedBG, ButtonBehavior, BoxLayout):
         text_col.add_widget(title_label)
         text_col.add_widget(sub_label)
         self.add_widget(text_col)
+
+        self.add_widget(ToolIcon(
+            kind="chevron", color=TEXT_MUTED,
+            size_hint=(None, None), size=(dp(14), dp(24)),
+        ))
 
         self.bind(on_release=lambda *_: on_press_cb())
 
@@ -851,6 +1020,13 @@ class PingScreen(Screen):
                 error = str(e)
 
         text = output if output else ("Erro: %s" % (error or "ping indisponivel"))
+        success = "bytes from" in text or "0% packet loss" in text
+        app = App.get_running_app()
+        if app is not None:
+            Clock.schedule_once(lambda dt: app.log_activity(
+                "Ping · %s" % host, "Concluido" if success else "Sem resposta",
+                color=SUCCESS if success else DANGER,
+            ))
         Clock.schedule_once(lambda dt: self.result.set_text(text))
 
 
@@ -1015,24 +1191,80 @@ class WifiScreen(Screen):
         Clock.schedule_once(lambda dt: self.result.set_text(text))
 
 
+class SpeedGauge(FloatLayout):
+    """Circular dial showing the last measured download speed, matching
+    the redesign mockup's "0.0 MBPS" ring (replaces the old plain button
+    + text-only result for the Speedtest screen)."""
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("size_hint", (None, None))
+        kwargs.setdefault("size", (dp(200), dp(200)))
+        super().__init__(**kwargs)
+        with self.canvas:
+            Color(*SURFACE_2)
+            self._ring = Line(width=dp(10))
+        self.bind(pos=self._redraw, size=self._redraw)
+
+        self.value_label = Label(
+            text="0.0", font_size="34sp", bold=True, color=TEXT,
+            size_hint=(1, None), height=dp(44),
+            pos_hint={"center_x": 0.5, "center_y": 0.58},
+            halign="center", valign="middle",
+        )
+        self.add_widget(self.value_label)
+
+        sub_row = BoxLayout(
+            size_hint=(None, None), size=(dp(56), dp(18)), spacing=dp(3),
+            pos_hint={"center_x": 0.5, "center_y": 0.40},
+        )
+        self.sub_label = Label(
+            text="MBPS", font_size="12sp", bold=True, color=ACCENT,
+            size_hint=(None, 1), width=dp(42),
+            halign="right", valign="middle",
+        )
+        self.sub_label.bind(size=lambda *_: setattr(self.sub_label, "text_size", self.sub_label.size))
+        sub_row.add_widget(self.sub_label)
+        sub_row.add_widget(ToolIcon(
+            kind="down", color=ACCENT, size_hint=(None, None), size=(dp(12), dp(12)),
+        ))
+        self.add_widget(sub_row)
+        self._redraw()
+
+    def _redraw(self, *_):
+        r = min(self.width, self.height) / 2 - dp(6)
+        if r <= 0:
+            return
+        self._ring.circle = (self.center_x, self.center_y, r)
+
+    def set_value(self, mbps):
+        self.value_label.text = "%.1f" % mbps
+
+    def set_text(self, text):
+        self.value_label.text = text
+
+
 class SpeedtestScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        root = BoxLayout(orientation="vertical", padding=(dp(18), dp(18)), spacing=dp(16))
-        root.add_widget(TopBar("Speedtest", "Velocidade de download da internet", on_back=_go_home))
+        root = BoxLayout(orientation="vertical", padding=(dp(18), dp(18)), spacing=dp(24))
+        root.add_widget(TopBar("Speedtest", "Velocidade de download", on_back=_go_home))
 
-        card = Card()
+        gauge_wrap = BoxLayout(size_hint_y=None, height=dp(220))
+        self.gauge = SpeedGauge(pos_hint={"center_x": 0.5, "center_y": 0.5})
+        gauge_wrap.add_widget(self.gauge)
+        root.add_widget(gauge_wrap)
+
         self.run_btn = PrimaryButton("Rodar speedtest")
         self.run_btn.bind(on_release=self.start_test)
-        card.add_widget(self.run_btn)
+        root.add_widget(self.run_btn)
 
         self.result = ResultBox()
 
-        root.add_widget(card)
         root.add_widget(self.result)
         self.add_widget(root)
 
     def start_test(self, *_):
+        self.gauge.set_text("...")
         self.result.set_text("Rodando speedtest, isso pode levar alguns segundos...")
         self._speedtest()
 
@@ -1051,6 +1283,7 @@ class SpeedtestScreen(Screen):
 
         errors = []
         text = None
+        result_mbps = None
         for test_url in test_urls:
             try:
                 start = time.time()
@@ -1067,6 +1300,7 @@ class SpeedtestScreen(Screen):
 
                 if elapsed > 0 and total_bytes > 0:
                     mbps = (total_bytes * 8 / 1_000_000) / elapsed
+                    result_mbps = mbps
                     text = (
                         "[b]Download:[/b] %.2f Mbps\n"
                         "[b]Baixado:[/b] %.1f MB em %.1fs\n"
@@ -1086,6 +1320,22 @@ class SpeedtestScreen(Screen):
                 + "\n".join(errors)
                 + "\n\nVerifique a conexao com a internet do aparelho."
             )
+
+        if result_mbps is not None:
+            Clock.schedule_once(lambda dt: self.gauge.set_value(result_mbps))
+        else:
+            Clock.schedule_once(lambda dt: self.gauge.set_text("0.0"))
+
+        app = App.get_running_app()
+        if app is not None:
+            if result_mbps is not None:
+                Clock.schedule_once(lambda dt: app.log_activity(
+                    "Speedtest", "%.1f Mbps" % result_mbps, color=SUCCESS,
+                ))
+            else:
+                Clock.schedule_once(lambda dt: app.log_activity(
+                    "Speedtest", "Falhou", color=DANGER,
+                ))
 
         Clock.schedule_once(lambda dt: self.result.set_text(text))
 
@@ -1263,6 +1513,13 @@ class NetworkScanScreen(Screen):
         final_text = header + ("\n\n".join(lines) if lines else "Nenhum host respondeu.")
         Clock.schedule_once(lambda dt: self.result.set_text(final_text))
 
+        app = App.get_running_app()
+        if app is not None:
+            count = len(alive_hosts)
+            Clock.schedule_once(lambda dt: app.log_activity(
+                "Varredura de rede", "%d hosts encontrados" % count, color=ACCENT,
+            ))
+
     @staticmethod
     def _format_host(ip, open_ports, hostname):
         ports_text = ", ".join(str(p) for p in open_ports) if open_ports else "nenhuma das checadas"
@@ -1396,7 +1653,17 @@ class SSHScreen(Screen):
         self.root_box.clear_widgets()
         self.root_box.padding = (dp(18), dp(18))
         self.root_box.spacing = dp(14)
-        self.root_box.add_widget(TopBar("SSH", "Terminal remoto interativo", on_back=_go_home))
+        profile_btn = SmallIconButton(
+            icon_widget=ToolIcon(
+                kind="person", color=ACCENT, size_hint=(0.55, 0.55),
+                pos_hint={"center_x": 0.5, "center_y": 0.5},
+            ),
+            size=(dp(36), dp(36)),
+        )
+        profile_btn.bind(on_release=self._focus_new_connection)
+        self.root_box.add_widget(TopBar(
+            "SSH", "Terminal remoto interativo", on_back=_go_home, right_widget=profile_btn,
+        ))
 
         scroll = ScrollView()
         inner = BoxLayout(orientation="vertical", spacing=dp(14), size_hint_y=None)
@@ -1457,12 +1724,16 @@ class SSHScreen(Screen):
         scroll.add_widget(inner)
         self.root_box.add_widget(scroll)
 
+    def _focus_new_connection(self, *_):
+        if getattr(self, "host_input", None) is not None:
+            self.host_input.focus = True
+
     def _build_saved_host_row(self, idx):
         h = self.saved_hosts[idx]
         row = BoxLayout(size_hint_y=None, height=dp(64), spacing=dp(8))
         label = h.get("name") or ("%s@%s" % (h.get("user") or "?", h.get("host") or "?"))
         sub = "%s@%s:%s" % (h.get("user") or "?", h.get("host") or "?", h.get("port") or "22")
-        item = MoreListItem(label, sub, "SH", on_press_cb=lambda i=idx: self._connect_saved(i))
+        item = MoreListItem(label, sub, "ssh", on_press_cb=lambda i=idx: self._connect_saved(i))
         row.add_widget(item)
         del_btn = SmallIconButton(text="x")
         del_btn.bind(on_release=lambda *_, i=idx: self._delete_saved(i))
@@ -1746,21 +2017,73 @@ class SSHScreen(Screen):
         self._show_setup()
 
 
+class SettingsScreen(Screen):
+    """Minimal settings/about screen, reached from the Home dashboard's
+    gear icon -- the app has no configurable options yet, so this just
+    shows app/version info."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        root = BoxLayout(orientation="vertical", padding=(dp(18), dp(18)), spacing=dp(16))
+        root.add_widget(TopBar("Configuracoes", "Sobre o aplicativo", on_back=_go_home))
+
+        card = Card()
+        card.add_widget(SectionLabel(text="APP"))
+        for text, size, color, bold in (
+            ("MAX Network Toolkit", "16sp", TEXT, True),
+            ("Versao 1.0", "13sp", TEXT_SECONDARY, False),
+            ("produzido by Marcos Max", "12sp", TEXT_MUTED, False),
+        ):
+            label = Label(
+                text=text, color=color, font_size=size, bold=bold,
+                halign="left", valign="middle", size_hint_y=None, height=dp(22),
+            )
+            label.bind(size=lambda *_, lb=label: setattr(lb, "text_size", lb.size))
+            card.add_widget(label)
+        root.add_widget(card)
+        self.add_widget(root)
+
+
+class ActivityRow(RoundedBG, BoxLayout):
+    """Row used in the Home dashboard's "Atividade recente" feed: a
+    status dot + bold title + muted subtitle (which tool ran, and when)."""
+
+    def __init__(self, title, subtitle, color=SUCCESS, **kwargs):
+        kwargs.setdefault("size_hint_y", None)
+        kwargs.setdefault("height", dp(54))
+        kwargs.setdefault("padding", (dp(14), dp(8)))
+        kwargs.setdefault("spacing", dp(12))
+        super().__init__(bg_color=SURFACE, radius=dp(14), **kwargs)
+
+        dot = Widget(size_hint=(None, None), size=(dp(8), dp(8)))
+        with dot.canvas:
+            Color(*color)
+            dot_ellipse = Ellipse(pos=dot.pos, size=dot.size)
+        dot.bind(pos=lambda w, *_: setattr(dot_ellipse, "pos", w.pos))
+        self.add_widget(dot)
+
+        col = BoxLayout(orientation="vertical", spacing=dp(2))
+        title_label = Label(
+            text=title, color=TEXT, bold=True, font_size="13sp",
+            halign="left", valign="middle",
+        )
+        title_label.bind(size=lambda *_: setattr(title_label, "text_size", title_label.size))
+        sub_label = Label(
+            text=subtitle, color=TEXT_SECONDARY, font_size="11sp",
+            halign="left", valign="middle",
+        )
+        sub_label.bind(size=lambda *_: setattr(sub_label, "text_size", sub_label.size))
+        col.add_widget(title_label)
+        col.add_widget(sub_label)
+        self.add_widget(col)
+
+
 class HomeScreen(Screen):
     """Painel inicial (dashboard): status rapido da rede atual + atalhos
     para todas as ferramentas, no estilo do redesign (grade de cards).
-    E' a tela raiz -- sem TopBar/voltar, pois a logo do app ja aparece no
-    cabecalho fixo acima do ScreenManager."""
-
-    TOOLS = [
-        ("Ping", "ping", "PG"),
-        ("Wi-Fi", "wifi", "WF"),
-        ("Speedtest", "speed", "SP"),
-        ("Portas", "ports", "PT"),
-        ("Varredura", "scan", "RD"),
-        ("Terminal", "terminal", "TM"),
-        ("SSH", "ssh", "SH"),
-    ]
+    E' a tela raiz -- tem seu proprio cabecalho (MAX / Network Toolkit +
+    engrenagem de configuracoes) em vez do antigo logo fixo acima do
+    ScreenManager, igual as demais telas."""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -1770,6 +2093,30 @@ class HomeScreen(Screen):
             size_hint_y=None,
         )
         root.bind(minimum_height=root.setter("height"))
+
+        home_header = BoxLayout(size_hint_y=None, height=dp(54), spacing=dp(10))
+        title_col = BoxLayout(orientation="vertical")
+        max_lbl = Label(
+            text="MAX", font_size="11sp", bold=True, color=TEXT_MUTED,
+            halign="left", valign="bottom", size_hint_y=None, height=dp(16),
+        )
+        max_lbl.bind(size=lambda *_: setattr(max_lbl, "text_size", max_lbl.size))
+        title_col.add_widget(max_lbl)
+        title_lbl = Label(
+            text="Network Toolkit", font_size="20sp", bold=True, color=TEXT,
+            halign="left", valign="top", size_hint_y=None, height=dp(30),
+        )
+        title_lbl.bind(size=lambda *_: setattr(title_lbl, "text_size", title_lbl.size))
+        title_col.add_widget(title_lbl)
+        home_header.add_widget(title_col)
+
+        gear_btn = SmallIconButton(icon_widget=ToolIcon(
+            kind="gear", color=ACCENT, size_hint=(0.55, 0.55),
+            pos_hint={"center_x": 0.5, "center_y": 0.5},
+        ))
+        gear_btn.bind(on_release=self._open_settings)
+        home_header.add_widget(gear_btn)
+        root.add_widget(home_header)
 
         self.status_card = Card()
 
@@ -1796,11 +2143,17 @@ class HomeScreen(Screen):
         root.add_widget(self.status_card)
 
         root.add_widget(SectionLabel(text="FERRAMENTAS"))
-        grid = GridLayout(cols=3, spacing=dp(10), size_hint_y=None)
+        grid = GridLayout(cols=4, spacing=dp(10), size_hint_y=None)
         grid.bind(minimum_height=grid.setter("height"))
-        for label, screen_name, badge in self.TOOLS:
-            grid.add_widget(ToolTile(label, badge, on_press_cb=lambda n=screen_name: self._goto(n)))
+        for label, screen_name, icon, _sub in TOOL_CATALOG:
+            grid.add_widget(ToolTile(label, icon, on_press_cb=lambda n=screen_name: self._goto(n)))
+        grid.add_widget(ToolTile("Todas", "more", on_press_cb=self._open_all_tools))
         root.add_widget(grid)
+
+        root.add_widget(SectionLabel(text="ATIVIDADE RECENTE"))
+        self.activity_box = BoxLayout(orientation="vertical", spacing=dp(10), size_hint_y=None)
+        self.activity_box.bind(minimum_height=self.activity_box.setter("height"))
+        root.add_widget(self.activity_box)
 
         scroll.add_widget(root)
         self.add_widget(scroll)
@@ -1833,10 +2186,39 @@ class HomeScreen(Screen):
         if app:
             app.switch_screen(name)
 
+    def _open_settings(self, *_):
+        app = App.get_running_app()
+        if app:
+            app.switch_screen("settings")
+
+    def _open_all_tools(self):
+        app = App.get_running_app()
+        if app:
+            app.toggle_more_sheet()
+
     def on_pre_enter(self, *_):
         if not self._checked_once:
             self._checked_once = True
             self.refresh_status()
+        self._refresh_activity()
+
+    def _refresh_activity(self):
+        app = App.get_running_app()
+        log = getattr(app, "activity_log", None) or []
+        self.activity_box.clear_widgets()
+        if not log:
+            placeholder = Label(
+                text="Nenhuma atividade recente ainda.", color=TEXT_MUTED, font_size="12sp",
+                size_hint_y=None, height=dp(30), halign="left", valign="middle",
+            )
+            placeholder.bind(size=lambda *_: setattr(placeholder, "text_size", placeholder.size))
+            self.activity_box.add_widget(placeholder)
+            return
+        for entry in log[:5]:
+            subtitle = "%s · %s" % (entry["subtitle"], _time_ago(entry["ts"]))
+            self.activity_box.add_widget(
+                ActivityRow(entry["title"], subtitle, color=entry["color"])
+            )
 
     def refresh_status(self, *_):
         self.ssid_label.text = "Lendo rede..."
@@ -2027,6 +2409,8 @@ class MaxApp(App):
             return container
 
     def _build_ui(self):
+        self.activity_log = []
+
         outer = FloatLayout()
         root = BoxLayout(orientation="vertical")
 
@@ -2034,18 +2418,6 @@ class MaxApp(App):
             Color(*BG)
             self._bg_rect = Rectangle(pos=root.pos, size=root.size)
         root.bind(pos=self._sync_bg, size=self._sync_bg)
-
-        header = FloatLayout(size_hint_y=None, height=dp(56))
-        header_logo_h = dp(38)
-        header_logo = KivyImage(
-            source=LOGO_PATH,
-            size_hint=(None, None),
-            size=(header_logo_h * LOGO_RATIO, header_logo_h),
-            pos_hint={"center_x": 0.5, "center_y": 0.5},
-            allow_stretch=True,
-            keep_ratio=True,
-        )
-        header.add_widget(header_logo)
 
         all_screens = [
             HomeScreen(name="home"),
@@ -2056,6 +2428,7 @@ class MaxApp(App):
             NetworkScanScreen(name="scan"),
             TerminalScreen(name="terminal"),
             SSHScreen(name="ssh"),
+            SettingsScreen(name="settings"),
         ]
 
         self.sm = ScreenManager(transition=NoTransition())
@@ -2089,10 +2462,8 @@ class MaxApp(App):
 
         self.more_sheet = MoreSheet(
             items=[
-                ("Scanner de portas", "Verifique portas TCP abertas", "PT", lambda: self.switch_screen("ports")),
-                ("Varredura de rede", "Descubra hosts ativos", "RD", lambda: self.switch_screen("scan")),
-                ("Terminal", "Comandos de shell, sem root", "TM", lambda: self.switch_screen("terminal")),
-                ("SSH", "Terminal remoto interativo", "SH", lambda: self.switch_screen("ssh")),
+                (label, sub, icon, self._make_switch_cb(screen_name))
+                for label, screen_name, icon, sub in TOOL_CATALOG
             ],
             on_close=self.hide_more_sheet,
             size_hint=(1, 1),
@@ -2106,7 +2477,6 @@ class MaxApp(App):
             color=TEXT_MUTED,
         )
 
-        root.add_widget(header)
         root.add_widget(self.sm)
         root.add_widget(nav_bar)
         root.add_widget(footer)
@@ -2125,6 +2495,18 @@ class MaxApp(App):
         btn = NavButton(label_text, on_press_cb=on_press_cb)
         self.nav_buttons.append((key, btn))
         return btn
+
+    def _make_switch_cb(self, screen_name):
+        return lambda: self.switch_screen(screen_name)
+
+    def log_activity(self, title, subtitle, color=SUCCESS):
+        """Records one entry for the Home dashboard's "Atividade recente"
+        feed. Kept in memory only (cleared on app restart) -- this is a
+        lightweight activity log, not a persisted history."""
+        self.activity_log.insert(0, {
+            "title": title, "subtitle": subtitle, "color": color, "ts": time.time(),
+        })
+        del self.activity_log[8:]
 
     def toggle_more_sheet(self):
         if self.more_sheet.disabled:
