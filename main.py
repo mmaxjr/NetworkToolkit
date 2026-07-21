@@ -155,6 +155,23 @@ def _signal_quality(rssi):
         return "regular"
     return "fraco"
 
+
+def _signal_level_info(rssi):
+    """Like _signal_quality, but also returns a 0-4 bar count and a color,
+    used to draw the signal-bars icon on the Home dashboard's network
+    card (mirrors the redesign mockup's status-bar-style signal icon)."""
+    try:
+        rssi = int(rssi)
+    except (TypeError, ValueError):
+        return 0, TEXT_MUTED, "Desconhecido"
+    if rssi >= -50:
+        return 4, SUCCESS, "Excelente"
+    if rssi >= -60:
+        return 3, SUCCESS, "Bom"
+    if rssi >= -70:
+        return 2, WARNING, "Regular"
+    return 1, DANGER, "Fraco"
+
 # ---------------------------------------------------------------------------
 # Theme -- paleta escura baseada no redesign visual v2 (cyan/dark, cards
 # arredondados, tipografia bem contrastada).
@@ -357,6 +374,45 @@ class RefreshIcon(Widget):
         p2x = ax + head * math.cos(tangent - 2.6)
         p2y = ay + head * math.sin(tangent - 2.6)
         self._arrow.points = [p1x, p1y, ax, ay, p2x, p2y]
+
+
+class SignalBarsIcon(Widget):
+    """4 vertical bars of increasing height, like the Wi-Fi signal icon in
+    the redesign mockup's Home network card. `set_level(n, color)` fills
+    the first n bars with `color` and leaves the rest muted."""
+
+    BAR_COUNT = 4
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("size_hint", (None, None))
+        kwargs.setdefault("size", (dp(26), dp(16)))
+        super().__init__(**kwargs)
+        self._level = 0
+        self._bar_colors = []
+        self._bar_rects = []
+        with self.canvas:
+            for _ in range(self.BAR_COUNT):
+                c = Color(*SURFACE_2)
+                r = Rectangle()
+                self._bar_colors.append(c)
+                self._bar_rects.append(r)
+        self.bind(pos=self._redraw, size=self._redraw)
+
+    def set_level(self, level, active_color=SUCCESS):
+        self._level = max(0, min(self.BAR_COUNT, level))
+        for i, c in enumerate(self._bar_colors):
+            c.rgba = active_color if i < self._level else SURFACE_2
+        self._redraw()
+
+    def _redraw(self, *_):
+        n = self.BAR_COUNT
+        gap = self.width * 0.14
+        bar_w = (self.width - gap * (n - 1)) / n
+        for i, rect in enumerate(self._bar_rects):
+            frac = (i + 1) / n
+            h = max(dp(2), self.height * frac)
+            rect.pos = (self.x + i * (bar_w + gap), self.y)
+            rect.size = (bar_w, h)
 
 
 class SmallIconButton(RoundedBG, ButtonBehavior, BoxLayout):
@@ -1473,18 +1529,25 @@ class HomeScreen(Screen):
         )
         root.bind(minimum_height=root.setter("height"))
 
-        root.add_widget(SectionLabel(text="REDE ATUAL"))
         self.status_card = Card()
-        self.status_label = Label(
-            text="Toque em atualizar para verificar a rede...",
-            markup=True, font_size="13sp", color=TEXT,
-            halign="left", valign="top", size_hint_y=None,
+
+        top_row = BoxLayout(size_hint_y=None, height=dp(26), spacing=dp(10))
+        self.ssid_label = Label(
+            text="Lendo rede...", color=TEXT, font_size="16sp", bold=True,
+            halign="left", valign="middle",
         )
-        self.status_label.bind(
-            width=lambda *_: setattr(self.status_label, "text_size", (self.status_label.width, None)),
-            texture_size=lambda *_: setattr(self.status_label, "height", self.status_label.texture_size[1]),
-        )
-        self.status_card.add_widget(self.status_label)
+        self.ssid_label.bind(size=lambda *_: setattr(self.ssid_label, "text_size", self.ssid_label.size))
+        top_row.add_widget(self.ssid_label)
+        self.signal_bars = SignalBarsIcon()
+        top_row.add_widget(self.signal_bars)
+        self.status_card.add_widget(top_row)
+
+        info_row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
+        self.ip_value = self._make_stat_column(info_row, "IP LOCAL")
+        self.gateway_value = self._make_stat_column(info_row, "GATEWAY")
+        self.signal_value = self._make_stat_column(info_row, "SINAL")
+        self.status_card.add_widget(info_row)
+
         refresh_btn = PrimaryButton("Atualizar status da rede")
         refresh_btn.bind(on_release=self.refresh_status)
         self.status_card.add_widget(refresh_btn)
@@ -1501,6 +1564,28 @@ class HomeScreen(Screen):
         self.add_widget(scroll)
         self._checked_once = False
 
+    @staticmethod
+    def _make_stat_column(parent, caption):
+        """Builds one "IP LOCAL / 192.168.0.34"-style column (small muted
+        caption above a bold value), adds it to `parent`, and returns the
+        value Label so callers can update it later."""
+        col = BoxLayout(orientation="vertical", spacing=dp(2))
+        cap = Label(
+            text=caption, font_size="10sp", color=TEXT_MUTED,
+            halign="left", valign="middle", size_hint_y=None, height=dp(14),
+        )
+        cap.bind(size=lambda *_: setattr(cap, "text_size", cap.size))
+        value = Label(
+            text="--", font_size="14sp", bold=True, color=TEXT,
+            halign="left", valign="middle", size_hint_y=None, height=dp(22),
+            shorten=True,
+        )
+        value.bind(size=lambda *_: setattr(value, "text_size", value.size))
+        col.add_widget(cap)
+        col.add_widget(value)
+        parent.add_widget(col)
+        return value
+
     def _goto(self, name):
         app = App.get_running_app()
         if app:
@@ -1512,14 +1597,23 @@ class HomeScreen(Screen):
             self.refresh_status()
 
     def refresh_status(self, *_):
-        self.status_label.text = "Lendo status da rede..."
+        self.ssid_label.text = "Lendo rede..."
         self._fetch_status()
+
+    def _apply_status(self, ssid, ip_addr, gateway, quality_text, level, color):
+        self.ssid_label.text = ssid
+        self.ip_value.text = ip_addr
+        self.gateway_value.text = gateway
+        self.signal_value.text = quality_text
+        self.signal_value.color = color
+        self.signal_bars.set_level(level, active_color=color)
 
     @run_in_thread
     def _fetch_status(self):
         if not IS_ANDROID:
-            text = "Status de rede via API Android so funciona no celular."
-            Clock.schedule_once(lambda dt: setattr(self.status_label, "text", text))
+            Clock.schedule_once(
+                lambda dt: self._apply_status("So' funciona no celular", "--", "--", "--", 0, TEXT_MUTED)
+            )
             return
         try:
             from jnius import autoclass, cast
@@ -1537,21 +1631,25 @@ class HomeScreen(Screen):
                 dhcp = wifi_manager.getDhcpInfo()
             except Exception:  # noqa: BLE001
                 dhcp = None
-            ssid = info.getSSID()
+            ssid = info.getSSID() or "?"
+            # A API do Android costuma devolver o SSID entre aspas literais
+            # (ex: "\"MinhaRede\""); o mockup mostra sem aspas, entao tiramos.
+            if len(ssid) >= 2 and ssid.startswith('"') and ssid.endswith('"'):
+                ssid = ssid[1:-1]
             rssi = info.getRssi()
             ip_addr = _int_to_ip(info.getIpAddress())
             gateway = _int_to_ip(dhcp.gateway) if dhcp else "?"
-            quality = _signal_quality(rssi)
-            text = (
-                "[b]SSID:[/b] %s\n"
-                "[b]IP:[/b] %s\n"
-                "[b]Gateway:[/b] %s\n"
-                "[b]Sinal:[/b] %s dBm (%s)"
-            ) % (ssid, ip_addr, gateway, rssi, quality)
+            level, color, quality_text = _signal_level_info(rssi)
         except Exception as e:  # noqa: BLE001
-            text = "Nao foi possivel ler o status da rede.\nErro: %s" % e
+            err = str(e)
+            Clock.schedule_once(
+                lambda dt: self._apply_status("Erro ao ler a rede", "--", "--", "--", 0, TEXT_MUTED)
+            )
+            return
 
-        Clock.schedule_once(lambda dt: setattr(self.status_label, "text", text))
+        Clock.schedule_once(
+            lambda dt: self._apply_status(ssid, ip_addr, gateway, quality_text, level, color)
+        )
 
 
 class LoadingOverlay(BoxLayout):
