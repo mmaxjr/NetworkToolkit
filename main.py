@@ -6,6 +6,7 @@ Scanner de Portas e Varredura de Rede (descoberta de hosts + hostname + portas).
 Compilado para Android via Buildozer / GitHub Actions.
 """
 
+import json
 import socket
 import ssl
 import struct
@@ -29,7 +30,7 @@ except Exception:  # noqa: BLE001
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.window import Window
-from kivy.graphics import Color, RoundedRectangle, Rectangle, Line
+from kivy.graphics import Color, RoundedRectangle, Rectangle, Line, Ellipse
 from kivy.metrics import dp
 from kivy.uix.screenmanager import ScreenManager, Screen, NoTransition
 from kivy.uix.boxlayout import BoxLayout
@@ -38,6 +39,7 @@ from kivy.uix.gridlayout import GridLayout
 from kivy.uix.image import Image as KivyImage
 from kivy.uix.label import Label
 from kivy.uix.textinput import TextInput
+from kivy.uix.checkbox import CheckBox
 from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.widget import Widget
@@ -82,6 +84,39 @@ def _ssh_checkpoint(text):
     try:
         with open("/sdcard/max_ssh_debug.txt", "a") as f:
             f.write(text + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _ssh_hosts_path():
+    """Where the list of saved SSH connections lives. Uses the app's own
+    private data dir (App.user_data_dir) -- unlike /sdcard, this never
+    needs a storage permission and is available on every Android version,
+    which is why it was chosen over the old /sdcard-based debug files."""
+    app = App.get_running_app()
+    base = app.user_data_dir if app is not None else ASSETS_DIR
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:  # noqa: BLE001
+        pass
+    return os.path.join(base, "ssh_hosts.json")
+
+
+def _load_ssh_hosts():
+    try:
+        with open(_ssh_hosts_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return data
+    except Exception:  # noqa: BLE001
+        pass
+    return []
+
+
+def _save_ssh_hosts(hosts):
+    try:
+        with open(_ssh_hosts_path(), "w", encoding="utf-8") as f:
+            json.dump(hosts, f)
     except Exception:  # noqa: BLE001
         pass
 
@@ -326,6 +361,45 @@ class FieldInput(TextInput):
         self.padding_y = max(0, (self.height - self.line_height) / 2)
 
 
+class SSHRawInput(TextInput):
+    """A "raw terminal" input: every keystroke is forwarded immediately to
+    the SSH channel (via the on_char/on_backspace callbacks), like a real
+    terminal emulator (PuTTY, Termux etc) -- instead of the usual
+    type-a-line-then-press-send pattern. The widget's own text buffer is
+    kept intentionally always empty: what appears on screen is only the
+    remote server's own echo, arriving through the terminal output above
+    this field, exactly like a real SSH client. `insert_text` is
+    overridden because that's how Kivy delivers typed characters from
+    Android's on-screen keyboard (not key-by-key events); `do_backspace`
+    is overridden because Android backspace goes through that method
+    rather than a key code on most keyboards."""
+
+    def __init__(self, on_char, on_backspace, **kwargs):
+        super().__init__(**kwargs)
+        self._on_char = on_char
+        self._on_backspace = on_backspace
+
+    def insert_text(self, substring, from_undo=False):
+        if substring and self._on_char:
+            self._on_char(substring)
+        # Nao insere de verdade -- o "eco" do que foi digitado vem do
+        # proprio servidor SSH, la' no terminal acima deste campo.
+        return
+
+    def do_backspace(self, from_undo=False, mode="bkspc"):
+        if self._on_backspace:
+            self._on_backspace()
+
+    def keyboard_on_key_down(self, window, keycode, text, modifiers):
+        code = keycode[1] if isinstance(keycode, (tuple, list)) else keycode
+        arrows = {"up": "\x1b[A", "down": "\x1b[B", "right": "\x1b[C", "left": "\x1b[D"}
+        if code in arrows:
+            if self._on_char:
+                self._on_char(arrows[code])
+            return True
+        return super().keyboard_on_key_down(window, keycode, text, modifiers)
+
+
 class PrimaryButton(RoundedBG, ButtonBehavior, BoxLayout):
     """Primary call-to-action pill button with rounded corners."""
 
@@ -340,6 +414,19 @@ class PrimaryButton(RoundedBG, ButtonBehavior, BoxLayout):
 
     def set_text(self, text):
         self.label.text = text
+
+
+class SmallDangerButton(RoundedBG, ButtonBehavior, BoxLayout):
+    """Compact pill button used for destructive/ending actions (e.g. the
+    "Encerrar" button on an active SSH session) -- dark red background,
+    red text, matching the redesign's danger styling."""
+
+    def __init__(self, text, **kwargs):
+        kwargs.setdefault("size_hint", (None, None))
+        kwargs.setdefault("size", (dp(92), dp(36)))
+        super().__init__(bg_color=(0.25, 0.12, 0.12, 1), radius=dp(18), **kwargs)
+        self.label = Label(text=text, color=DANGER, bold=True, font_size="12sp")
+        self.add_widget(self.label)
 
 
 class RefreshIcon(Widget):
@@ -1269,8 +1356,9 @@ class TerminalScreen(Screen):
 
 class SSHScreen(Screen):
     """Terminal SSH interativo, estilo PuTTY: conecta a um servidor remoto
-    via usuario/senha e mantem um shell aberto para enviar comandos e ver
-    a saida em tempo real.
+    via usuario/senha e mantem um shell aberto, com digitacao direta no
+    terminal (sem campo de comando separado) e uma lista de hosts salvos
+    para reconectar rapido.
 
     Implementado com JSch (biblioteca SSH2 100% Java, sem nenhum codigo
     nativo) via pyjnius, em vez de paramiko. paramiko dependia de bcrypt,
@@ -1278,15 +1366,53 @@ class SSHScreen(Screen):
     que se mostraram extremamente frageis ou impossiveis de cross-compilar
     para Android nesta toolchain (python-for-android + NDK r25b). Como o
     JSch e' Java puro, o Gradle simplesmente baixa a biblioteca pronta
-    (ver android.gradle_dependencies no buildozer.spec) -- nao ha' nada
-    para compilar."""
+    (ver android.add_jars no buildozer.spec) -- nao ha' nada para compilar.
+
+    A tela tem duas "vistas" trocadas via clear_widgets()/add_widget():
+    _show_setup() (lista de hosts salvos + formulario de nova conexao) e
+    _show_terminal() (terminal em tela cheia, estilo PuTTY de verdade)."""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        root = BoxLayout(orientation="vertical", padding=(dp(18), dp(18)), spacing=dp(12))
-        root.add_widget(TopBar("SSH", "Terminal remoto interativo", on_back=_go_home))
+        self.saved_hosts = _load_ssh_hosts()
 
+        self.session = None
+        self.channel = None
+        self.input_stream = None
+        self.output_stream = None
+        self._connected = False
+        self._buffer = ""
+        self._last_host = ""
+        self._last_user = ""
+
+        self.root_box = BoxLayout(orientation="vertical")
+        self.add_widget(self.root_box)
+        self._show_setup()
+
+    # ------------------------------------------------------------------
+    # Vista 1: hosts salvos + formulario de nova conexao
+    # ------------------------------------------------------------------
+    def _show_setup(self):
+        self.root_box.clear_widgets()
+        self.root_box.padding = (dp(18), dp(18))
+        self.root_box.spacing = dp(14)
+        self.root_box.add_widget(TopBar("SSH", "Terminal remoto interativo", on_back=_go_home))
+
+        scroll = ScrollView()
+        inner = BoxLayout(orientation="vertical", spacing=dp(14), size_hint_y=None)
+        inner.bind(minimum_height=inner.setter("height"))
+
+        if self.saved_hosts:
+            inner.add_widget(SectionLabel(text="HOSTS SALVOS"))
+            for idx in range(len(self.saved_hosts)):
+                inner.add_widget(self._build_saved_host_row(idx))
+
+        inner.add_widget(SectionLabel(text="NOVA CONEXAO"))
         card = Card()
+        card.add_widget(SectionLabel(text="Nome (opcional)"))
+        self.name_input = FieldInput(hint_text="ex: NAS Synology")
+        card.add_widget(self.name_input)
+
         card.add_widget(SectionLabel(text="Host e porta"))
         row1 = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(8))
         self.host_input = FieldInput(hint_text="ex: 192.168.0.10", size_hint_x=0.7)
@@ -1303,67 +1429,188 @@ class SSHScreen(Screen):
         self.pass_input = FieldInput(password=True)
         card.add_widget(self.pass_input)
 
+        save_row = BoxLayout(size_hint_y=None, height=dp(34), spacing=dp(8))
+        # CheckBox nao tem uma propriedade "color" generica no Kivy (a
+        # aparencia dela vem de imagens internas, nao de uma cor simples),
+        # entao nao da' pra recolorir facil -- deixa no estilo padrao.
+        self.save_check = CheckBox(size_hint=(None, None), size=(dp(28), dp(28)))
+        save_row.add_widget(self.save_check)
+        save_label = Label(
+            text="Salvar este host (com senha) para conectar rapido depois",
+            font_size="12sp", color=TEXT_SECONDARY, halign="left", valign="middle",
+        )
+        save_label.bind(size=lambda *_: setattr(save_label, "text_size", save_label.size))
+        save_row.add_widget(save_label)
+        card.add_widget(save_row)
+
         self.connect_btn = PrimaryButton("Conectar")
-        self.connect_btn.bind(on_release=self.toggle_connection)
+        self.connect_btn.bind(on_release=lambda *_: self.connect(maybe_save=True))
         card.add_widget(self.connect_btn)
 
         self.status_label = Label(
-            text="Desconectado",
-            size_hint_y=None,
-            height=dp(20),
-            font_size="12sp",
-            color=TEXT_MUTED,
+            text="Desconectado", size_hint_y=None, height=dp(20),
+            font_size="12sp", color=TEXT_MUTED,
         )
         card.add_widget(self.status_label)
 
-        self.terminal = ResultBox()
-        self.terminal.set_text(
-            "Preencha host, usuario e senha e toque em Conectar para abrir "
-            "um terminal SSH interativo (como um PuTTY simples)."
+        inner.add_widget(card)
+        scroll.add_widget(inner)
+        self.root_box.add_widget(scroll)
+
+    def _build_saved_host_row(self, idx):
+        h = self.saved_hosts[idx]
+        row = BoxLayout(size_hint_y=None, height=dp(64), spacing=dp(8))
+        label = h.get("name") or ("%s@%s" % (h.get("user") or "?", h.get("host") or "?"))
+        sub = "%s@%s:%s" % (h.get("user") or "?", h.get("host") or "?", h.get("port") or "22")
+        item = MoreListItem(label, sub, "SH", on_press_cb=lambda i=idx: self._connect_saved(i))
+        row.add_widget(item)
+        del_btn = SmallIconButton(text="x")
+        del_btn.bind(on_release=lambda *_, i=idx: self._delete_saved(i))
+        row.add_widget(del_btn)
+        return row
+
+    def _delete_saved(self, idx):
+        try:
+            del self.saved_hosts[idx]
+        except IndexError:
+            return
+        _save_ssh_hosts(self.saved_hosts)
+        self._show_setup()
+
+    def _connect_saved(self, idx):
+        try:
+            h = self.saved_hosts[idx]
+        except IndexError:
+            return
+        self.connect(
+            host=h.get("host", ""), port=h.get("port", "22"),
+            user=h.get("user", ""), password=h.get("password", ""),
+            maybe_save=False,
         )
 
-        cmd_row = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(8))
-        self.cmd_input = FieldInput(hint_text="digite um comando e toque em enviar")
-        self.cmd_input.bind(on_text_validate=self.send_command)
-        cmd_row.add_widget(self.cmd_input)
-        self.send_btn = SmallIconButton(text=">")
-        self.send_btn.bind(on_release=self.send_command)
-        cmd_row.add_widget(self.send_btn)
+    # ------------------------------------------------------------------
+    # Vista 2: terminal em tela cheia (estilo PuTTY)
+    # ------------------------------------------------------------------
+    def _show_terminal(self):
+        self.root_box.clear_widgets()
+        self.root_box.padding = (dp(14), dp(14))
+        self.root_box.spacing = dp(10)
 
-        root.add_widget(card)
-        root.add_widget(self.terminal)
-        root.add_widget(cmd_row)
-        self.add_widget(root)
+        header = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(10))
+        header.add_widget(BackButton(on_back=self.disconnect))
 
-        self.session = None
-        self.channel = None
-        self.input_stream = None
-        self.output_stream = None
-        self._connected = False
-        self._buffer = ""
+        title_col = BoxLayout(orientation="vertical")
+        title_row = BoxLayout(size_hint_y=None, height=dp(20), spacing=dp(6))
+        dot = Widget(size_hint=(None, None), size=(dp(9), dp(9)))
+        with dot.canvas:
+            Color(*SUCCESS)
+            dot_ellipse = Ellipse(pos=dot.pos, size=dot.size)
+        dot.bind(pos=lambda w, *_: setattr(dot_ellipse, "pos", w.pos))
+        title_row.add_widget(dot)
+        session_label = Label(
+            text="%s@%s" % (self._last_user or "?", self._last_host or "?"),
+            color=TEXT, bold=True, font_size="15sp",
+            halign="left", valign="middle",
+        )
+        session_label.bind(size=lambda *_: setattr(session_label, "text_size", session_label.size))
+        title_row.add_widget(session_label)
+        title_col.add_widget(title_row)
 
-    def toggle_connection(self, *_):
-        if self._connected:
-            self.disconnect()
+        sub_label = Label(
+            text="Sessao SSH ativa", color=TEXT_MUTED, font_size="11sp",
+            halign="left", valign="middle", size_hint_y=None, height=dp(16),
+        )
+        sub_label.bind(size=lambda *_: setattr(sub_label, "text_size", sub_label.size))
+        title_col.add_widget(sub_label)
+        header.add_widget(title_col)
+
+        end_btn = SmallDangerButton("Encerrar")
+        end_btn.bind(on_release=self.disconnect)
+        header.add_widget(end_btn)
+        self.root_box.add_widget(header)
+
+        self.terminal = ResultBox()
+        self.terminal.label.color = SUCCESS
+        self.terminal.set_text("")
+        self.root_box.add_widget(self.terminal)
+
+        quick_row = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(6))
+        for label, seq in (("Tab", "\t"), ("^C", "\x03"), ("Esc", "\x1b"), ("Up", "\x1b[A"), ("Down", "\x1b[B")):
+            # Passa "size" explicito (alem de size_hint) porque
+            # SmallIconButton tem um kwargs.setdefault("size", ...) interno
+            # que, se "size" nao estiver nos kwargs, e' inserido DEPOIS e
+            # acaba sobrescrevendo a altura que a gente quer aqui.
+            btn = SmallIconButton(text=label, size_hint=(1, None), size=(dp(50), dp(38)))
+            btn.label.font_size = "12sp"
+            btn.bind(on_release=lambda *_, s=seq: self._send_raw(s))
+            quick_row.add_widget(btn)
+        self.root_box.add_widget(quick_row)
+
+        self.raw_input = SSHRawInput(
+            on_char=self._send_raw,
+            on_backspace=lambda: self._send_raw("\x7f"),
+            hint_text="Toque aqui e digite -- funciona como um terminal",
+            size_hint_y=None, height=dp(46), multiline=False,
+            font_size="15sp", padding_x=dp(16),
+            background_normal="", background_active="",
+            background_color=SURFACE_2, foreground_color=SUCCESS,
+            cursor_color=ACCENT, hint_text_color=TEXT_MUTED,
+        )
+        self.raw_input.bind(on_text_validate=lambda *_: self._send_raw("\r"))
+        self.root_box.add_widget(self.raw_input)
+        Clock.schedule_once(lambda dt: setattr(self.raw_input, "focus", True), 0.3)
+
+    def _send_raw(self, text):
+        if not self._connected or not self.output_stream:
+            return
+        try:
+            data = bytearray(text.encode("utf-8"))
+            self.output_stream.write(data)
+            self.output_stream.flush()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ------------------------------------------------------------------
+    # Conexao (JSch) -- mesma logica ja validada, so' mudou pra onde ela
+    # manda o usuario quando conecta/desconecta.
+    # ------------------------------------------------------------------
+    def connect(self, host=None, port=None, user=None, password=None, maybe_save=False):
+        if host is None:
+            host = self.host_input.text.strip()
         else:
-            self.connect()
-
-    def connect(self, *_):
-        host = self.host_input.text.strip()
+            host = host.strip()
         if not host:
             self.status_label.text = "Informe o host."
             return
+        raw_port = port if port is not None else self.port_input.text.strip()
         try:
-            port = int(self.port_input.text.strip() or "22")
+            port_num = int(str(raw_port).strip() or "22")
         except ValueError:
             self.status_label.text = "Porta invalida."
             return
-        user = self.user_input.text.strip()
-        password = self.pass_input.text
+        if user is None:
+            user = self.user_input.text.strip()
+        if password is None:
+            password = self.pass_input.text
 
+        if maybe_save and getattr(self, "save_check", None) is not None and self.save_check.active:
+            name = self.name_input.text.strip() or ("%s@%s" % (user or "?", host))
+            entry = {"name": name, "host": host, "port": str(port_num), "user": user, "password": password}
+            replaced = False
+            for i, existing in enumerate(self.saved_hosts):
+                if existing.get("host") == host and existing.get("user") == user:
+                    self.saved_hosts[i] = entry
+                    replaced = True
+                    break
+            if not replaced:
+                self.saved_hosts.append(entry)
+            _save_ssh_hosts(self.saved_hosts)
+
+        self._last_host = host
+        self._last_user = user
         self.status_label.text = "Conectando..."
         self.connect_btn.set_text("Conectando...")
-        self._connect_thread(host, port, user, password)
+        self._connect_thread(host, port_num, user, password)
 
     @run_in_thread
     def _connect_thread(self, host, port, user, password):
@@ -1431,19 +1678,22 @@ class SSHScreen(Screen):
         all. Sleeps briefly after updating so Kivy actually gets to draw
         the new text before the next (possibly crashing) step runs --
         otherwise a near-instant native crash could kill the process
-        before the label's new text is ever rendered to the screen."""
+        before the label's new text is ever rendered to the screen. Only
+        touches self.status_label, which only exists while the setup view
+        (before a successful connection) is showing -- exactly when this
+        runs."""
         _ssh_checkpoint(text)
         Clock.schedule_once(lambda dt: setattr(self.status_label, "text", text))
         time.sleep(0.15)
 
     def _on_connected(self):
-        self.status_label.text = "Conectado a %s." % self.host_input.text.strip()
-        self.connect_btn.set_text("Desconectar")
-        self.terminal.set_text("")
+        self._show_terminal()
 
     def _set_status(self, text):
-        self.status_label.text = text
-        self.connect_btn.set_text("Conectar")
+        if getattr(self, "status_label", None) is not None:
+            self.status_label.text = text
+        if getattr(self, "connect_btn", None) is not None:
+            self.connect_btn.set_text("Conectar")
         self._connected = False
 
     def _read_loop(self):
@@ -1466,25 +1716,18 @@ class SSHScreen(Screen):
                 time.sleep(0.1)
             except Exception:  # noqa: BLE001
                 break
+        was_connected = self._connected
         self._connected = False
-        Clock.schedule_once(lambda dt: self._set_status("Desconectado."))
+        if was_connected:
+            # Desconexao "espontanea" (queda de rede, servidor derrubou a
+            # sessao etc) -- volta pra tela de setup sozinha.
+            Clock.schedule_once(lambda dt: self._show_setup())
 
     def _update_terminal(self, text):
+        if getattr(self, "terminal", None) is None:
+            return
         self.terminal.set_text(text)
         self.terminal.scroll_y = 0
-
-    def send_command(self, *_):
-        if not self._connected or not self.output_stream:
-            return
-        cmd = self.cmd_input.text
-        try:
-            data = bytearray((cmd + "\n").encode("utf-8"))
-            self.output_stream.write(data)
-            self.output_stream.flush()
-        except Exception as e:  # noqa: BLE001
-            self._buffer += "\n[erro ao enviar: %s]\n" % e
-            self._update_terminal(self._buffer)
-        self.cmd_input.text = ""
 
     def disconnect(self, *_):
         self._connected = False
@@ -1500,8 +1743,7 @@ class SSHScreen(Screen):
             pass
         self.channel = None
         self.session = None
-        self.status_label.text = "Desconectado."
-        self.connect_btn.set_text("Conectar")
+        self._show_setup()
 
 
 class HomeScreen(Screen):
