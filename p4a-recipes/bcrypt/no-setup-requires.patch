@@ -1,0 +1,10 @@
+--- a/setup.py
++++ b/setup.py
+@@ -142,7 +142,6 @@
+         }
+     else:
+         return {
+-            "setup_requires": [CFFI_DEPENDENCY],
+             "cmdclass": {
+                 "test": PyTest,
+             },

@@ -1,0 +1,65 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.11
+
+      - name: Install system dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y git zip unzip openjdk-17-jdk autoconf libtool pkg-config zlib1g-dev libncurses-dev cmake libffi-dev libssl-dev build-essential
+
+      - name: Force python3/pip3 to point to Python 3.11
+        run: |
+          sudo ln -sf "$(command -v python)" /usr/bin/python3
+          sudo ln -sf "$(command -v pip)" /usr/bin/pip3
+          python3 --version
+          pip3 --version
+
+      - name: Install buildozer and cython
+        run: |
+          python -m pip install "pip==24.0"
+          python -m pip install buildozer==1.5.0 python-for-android==2024.1.21 cython==0.29.36 pycparser
+
+      - name: Install Android NDK r25b (known-good version for this app)
+        run: |
+          mkdir -p "$HOME/.buildozer/android/platform"
+          cd "$HOME/.buildozer/android/platform"
+          curl -L -o ndk.zip https://dl.google.com/android/repository/android-ndk-r25b-linux.zip
+          unzip -q ndk.zip
+          rm ndk.zip
+          mv android-ndk-r25b android-ndk-r28c
+          echo "ANDROIDNDK=$HOME/.buildozer/android/platform/android-ndk-r28c" >> "$GITHUB_ENV"
+
+      - name: Download JSch jar (used by the SSH tab, pure Java, no native code)
+        run: |
+          mkdir -p libs
+          curl -L -o libs/jsch-0.1.55.jar https://repo1.maven.org/maven2/com/jcraft/jsch/0.1.55/jsch-0.1.55.jar
+          ls -la libs
+
+      - name: Build APK
+        run: |
+          export JAVA_HOME=/usr/lib/jvm/temurin-17-jdk-amd64
+          export PATH=$JAVA_HOME/bin:$PATH
+          echo "pip==24.0" > /tmp/pip-constraints.txt
+          export PIP_CONSTRAINT=/tmp/pip-constraints.txt
+          export CFLAGS="-Wno-error"
+          yes | python -m buildozer android debug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-toolkit-apk
+          path: bin/*.apk
