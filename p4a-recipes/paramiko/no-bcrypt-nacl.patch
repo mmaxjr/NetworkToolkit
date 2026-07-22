@@ -1,0 +1,33 @@
+--- a/paramiko/__init__.py
++++ b/paramiko/__init__.py
+@@ -51,7 +51,6 @@
+ from paramiko.rsakey import RSAKey
+ from paramiko.dsskey import DSSKey
+ from paramiko.ecdsakey import ECDSAKey
+-from paramiko.ed25519key import Ed25519Key
+ from paramiko.sftp import SFTPError, BaseSFTP
+ from paramiko.sftp_client import SFTP, SFTPClient
+ from paramiko.sftp_server import SFTPServer
+@@ -111,7 +110,6 @@
+     "CouldNotCanonicalize",
+     "DSSKey",
+     "ECDSAKey",
+-    "Ed25519Key",
+     "HostKeys",
+     "Message",
+     "MissingHostKeyPolicy",
+--- a/paramiko/pkey.py
++++ b/paramiko/pkey.py
+@@ -28,7 +28,11 @@
+ import struct
+
+ import six
+-import bcrypt
++
++try:
++    import bcrypt
++except ImportError:
++    bcrypt = None
+
+ from cryptography.hazmat.backends import default_backend
+ from cryptography.hazmat.primitives import serialization
